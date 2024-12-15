@@ -17,7 +17,7 @@ GrayScan-ը ցանցի սկանավորման գործիք է, որը նախատ
 
 1. **Կլոնավորեք ռեպոզիտորիան**:
     ```bash
-    git clone 
+    git clone https://github.com/MrGrayHub/GrayScan.git
     cd GrayScan/
     ```
 
