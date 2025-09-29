@@ -1,118 +1,178 @@
 #!/bin/bash
-
+# Cross-distro installer for GrayScan
 INSTALL_DIR="/opt/gray_scan_project"
+BIN_NAME="gmap"
+ENTRY_SCRIPT="gmap.sh"
 
-if ! command -v python3 &> /dev/null; then
-    echo "[GrayScan] Python3 is not installed. Please install Python3 and try again."
-    exit 1
+# --- Helpers ---
+echo_info() { echo "[GrayScan] $*"; }
+echo_err()  { echo "[GrayScan] ERROR: $*" >&2; }
+
+# --- Ensure Python3 exists (try to install later if missing) ---
+if ! command -v python3 &>/dev/null; then
+    echo_info "Python3 not found. The script will attempt to install it."
+else
+    echo_info "Python3 detected: $(command -v python3)"
 fi
 
-
-if command -v sudo &> /dev/null; then
+# --- Privilege escalation detection ---
+if command -v sudo &>/dev/null; then
     SUDO="sudo"
-elif command -v doas &> /dev/null; then
+elif command -v doas &>/dev/null; then
     SUDO="doas"
-elif command -v su &> /dev/null; then
+elif [ "$(id -u)" -eq 0 ]; then
+    SUDO=""
+elif command -v su &>/dev/null; then
+    # use su -c "cmd" pattern when needed
     SUDO="su -c"
 else
-    echo "[GrayScan] Neither sudo, doas, nor su is installed. Please install one of these and try again."
+    echo_err "No sudo/doas/su found and not running as root. Please run as root or install sudo/doas."
     exit 1
 fi
 
-install_if_missing() {
-    PACKAGE=$1
-    python3 -c "import $PACKAGE" &> /dev/null
-    if [ $? -ne 0 ]; then
-        echo "[GrayScan] $PACKAGE not found. Installing it now..."
-        if ! pip install $PACKAGE; then
-            echo "[GrayScan] Failed to install $PACKAGE. Please install it manually."
-            exit 1
-        fi
+# Helper to run install commands with proper prefix
+run_priv() {
+    if [ -z "$SUDO" ]; then
+        # already root
+        bash -c "$*"
+    elif [ "$SUDO" = "su -c" ]; then
+        su -c "$*"
     else
-        echo "[GrayScan] $PACKAGE is already installed."
+        $SUDO bash -c "$*"
     fi
 }
 
-if ! command -v pip &> /dev/null; then
-    echo "[GrayScan] pip not found. Installing it now..."
-    if ! python3 -m ensurepip --upgrade; then
-        echo "[GrayScan] Failed to install pip. Please install it manually."
-        exit 1
-    fi
+# --- Ensure pip (prefer pip3) ---
+PIP_CMD=""
+if command -v pip3 &>/dev/null; then
+    PIP_CMD="pip3"
+elif command -v pip &>/dev/null; then
+    PIP_CMD="pip"
 fi
 
+if [ -z "$PIP_CMD" ]; then
+    echo_info "pip not found. Attempting to bootstrap pip via python3 -m ensurepip..."
+    if python3 -m ensurepip --upgrade &>/dev/null; then
+        PIP_CMD="python3 -m pip"
+    else
+        echo_info "ensurepip failed or not available. Will install pip via package manager below."
+        PIP_CMD="python3 -m pip"
+    fi
+else
+    # prefer using python3 -m pip to avoid mismatched Python
+    PIP_CMD="python3 -m pip"
+fi
+
+# --- Detect OS and install Python/pip if needed ---
+OS="unknown"
 if [ -f /etc/os-release ]; then
     . /etc/os-release
     OS=$ID
-else
-    echo "[GrayScan] Cannot detect the operating system. Please install necessary packages manually."
-    exit 1
 fi
+echo_info "Detected OS: $OS"
 
 case $OS in
-    ubuntu|debian|kali)
-        echo "[GrayScan] Detected Debian-based system. Installing necessary packages..."
-        $SUDO apt update
-        $SUDO apt install -y python3 python3-pip
+    ubuntu|debian|kali|linuxmint|pop|parrot)
+        echo_info "Using apt (Debian/Ubuntu family)..."
+        run_priv "apt update -y"
+        run_priv "apt install -y python3 python3-venv python3-distutils python3-pip"
         ;;
     arch|manjaro)
-        echo "[GrayScan] Detected Arch-based system. Installing necessary packages..."
-        $SUDO pacman -Sy
-        $SUDO pacman -S --noconfirm python python-pip
+        echo_info "Using pacman (Arch family)..."
+        run_priv "pacman -Sy --noconfirm"
+        run_priv "pacman -S --noconfirm python python-pip"
         ;;
     fedora)
-        echo "[GrayScan] Detected Fedora-based system. Installing necessary packages..."
-        $SUDO dnf install -y python3 python3-pip
+        echo_info "Using dnf (Fedora)..."
+        run_priv "dnf install -y python3 python3-pip"
         ;;
-    centos|rhel)
-        echo "[GrayScan] Detected RHEL-based system. Installing necessary packages..."
-        $SUDO yum install -y python3 python3-pip
+    centos|rhel|rocky|almalinux)
+        echo_info "Using yum (RHEL family)..."
+        run_priv "yum install -y python3 python3-pip || dnf install -y python3 python3-pip"
         ;;
-    opensuse|suse)
-        echo "[GrayScan] Detected openSUSE-based system. Installing necessary packages..."
-        $SUDO zypper install -y python3 python3-pip
-        ;;
-    termux)
-        echo "[GrayScan] Detected Termux environment. Installing necessary packages..."
-        pkg update
-        pkg install -y python
+    opensuse*|suse)
+        echo_info "Using zypper (openSUSE/SUSE)..."
+        run_priv "zypper install -y python3 python3-pip"
         ;;
     alpine)
-        echo "[GrayScan] Detected iSH (Alpine Linux) environment. Installing necessary packages..."
-        apk update
-        apk add python3 py3-pip
+        echo_info "Using apk (Alpine)..."
+        run_priv "apk update"
+        run_priv "apk add --no-cache python3 py3-pip"
+        ;;
+    termux)
+        echo_info "Using pkg (Termux)..."
+        run_priv "pkg update -y"
+        run_priv "pkg install -y python"
         ;;
     freebsd)
-        echo "[GrayScan] Detected FreeBSD system. Installing necessary packages..."
-        $SUDO pkg install -y python3 py38-pip
+        echo_info "Using pkg (FreeBSD)..."
+        run_priv "pkg install -y python3 py38-pip"
         ;;
     *)
-        echo "[GrayScan] Unsupported operating system. Please install necessary packages manually."
-        exit 1
+        echo_info "Unknown OS ID. Trying to detect package manager..."
+        if command -v apt &>/dev/null; then
+            run_priv "apt update -y && apt install -y python3 python3-pip"
+        elif command -v dnf &>/dev/null; then
+            run_priv "dnf install -y python3 python3-pip"
+        elif command -v yum &>/dev/null; then
+            run_priv "yum install -y python3 python3-pip"
+        elif command -v pacman &>/dev/null; then
+            run_priv "pacman -Sy --noconfirm python python-pip"
+        elif command -v zypper &>/dev/null; then
+            run_priv "zypper install -y python3 python3-pip"
+        elif command -v apk &>/dev/null; then
+            run_priv "apk add --no-cache python3 py3-pip"
+        else
+            echo_err "Could not find a supported package manager. Please install python3 and pip manually."
+            exit 1
+        fi
         ;;
 esac
 
-pip install -r "requirements.txt"
+# re-evaluate pip command to prefer python3 -m pip
+PIP_CMD="python3 -m pip"
 
+# --- Install Python requirements if requirements.txt exists ---
+if [ -f "requirements.txt" ]; then
+    echo_info "Installing python dependencies from requirements.txt..."
+    if ! $PIP_CMD install --upgrade -r requirements.txt; then
+        echo_err "Failed to install Python requirements. You may try to run '$PIP_CMD install -r requirements.txt' manually."
+        # continue, maybe optional deps
+    fi
+else
+    echo_info "No requirements.txt found; skipping Python dependency installation."
+fi
+
+# --- Install project files to INSTALL_DIR ---
 if [ ! -d "$INSTALL_DIR" ]; then
-    $SUDO mkdir -p "$INSTALL_DIR"
-    $SUDO cp -r . "$INSTALL_DIR"
-    echo "[GrayScan] Project cloned to $INSTALL_DIR"
+    echo_info "Creating install dir $INSTALL_DIR and copying files..."
+    run_priv "mkdir -p '$INSTALL_DIR'"
+    # copy all files except common system dirs and .git if present
+    run_priv "cp -r . '$INSTALL_DIR'"
+    echo_info "Project copied to $INSTALL_DIR"
 else
-    echo "[GrayScan] Project already exists in $INSTALL_DIR"
+    echo_info "Project already exists at $INSTALL_DIR"
 fi
 
-$SUDO chmod +x "$INSTALL_DIR/gmap.sh"
-$SUDO chmod +x "$INSTALL_DIR/run.sh"
-$SUDO chmod +x "$INSTALL_DIR/config.sh"
+# --- Make entry scripts executable if present ---
+for f in "$INSTALL_DIR/$ENTRY_SCRIPT" "$INSTALL_DIR/run.sh" "$INSTALL_DIR/config.sh"; do
+    if [ -f "$f" ]; then
+        run_priv "chmod +x '$f'"
+        echo_info "Made $f executable"
+    fi
+done
 
-if [ ! -L /usr/local/bin/gmap ]; then
-    $SUDO ln -s "$INSTALL_DIR/gmap.sh" /usr/local/bin/gmap
-    echo "[GrayScan] Created symbolic link /usr/local/bin/gmap"
+# --- Create symlink in /usr/local/bin (handles existing regular file carefully) ---
+TARGET_LINK="/usr/local/bin/$BIN_NAME"
+if [ -L "$TARGET_LINK" ]; then
+    echo_info "Symlink $TARGET_LINK already exists."
+elif [ -e "$TARGET_LINK" ]; then
+    echo_err "$TARGET_LINK exists and is not a symlink. Not overwriting."
+    echo_err "If you want to replace it, remove it and re-run this installer."
 else
-    echo "[GrayScan] Symbolic link /usr/local/bin/gmap already exists"
+    run_priv "ln -s '$INSTALL_DIR/$ENTRY_SCRIPT' '$TARGET_LINK'"
+    echo_info "Created symlink $TARGET_LINK -> $INSTALL_DIR/$ENTRY_SCRIPT"
 fi
 
-echo "[GrayScan] Installation complete. You can now run the GrayScan project by calling 'gmap' from the terminal."
-echo "[GrayScan] Usage: gmap <target> [options]"
-echo "[GrayScan] Or use gmap --help to show more information"
+echo_info "Installation complete. Run: $BIN_NAME <target> [options]"
+echo_info "Or run: $BIN_NAME --help"
